@@ -3,7 +3,4 @@ pandas
 numpy
 plotly
 openpyxl
-matplotlib
-scipy
 statsmodels
-scikit-learn
