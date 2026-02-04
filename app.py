@@ -1,27 +1,21 @@
-# ============================================================
-# GOALKEEPER DASHBOARD + MULTI-FILE GK COMPARISON (Streamlit)
-# Futuristic + modern styling, proportionate charts
-# ============================================================
-
 import io
-import pandas as pd
+import re
 import numpy as np
+import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
 
 # -------------------- Page config --------------------
-st.set_page_config(page_title="GK Dashboard", page_icon="🧤", layout="wide")
+st.set_page_config(page_title="Sport Auto Dashboard", page_icon="📊", layout="wide")
 
-# -------------------- Global visual theme (modern / futuristic) --------------------
-THEME_BG = "#0b0f1a"          # deep navy
+# -------------------- Theme --------------------
+THEME_BG = "#0b0f1a"
 THEME_GRID = "rgba(255,255,255,0.08)"
 THEME_TEXT = "rgba(255,255,255,0.92)"
-
-CHART_HEIGHT = 420           # consistent, not too big
+CHART_HEIGHT = 420
 CHART_MARGIN = dict(l=40, r=25, t=60, b=45)
-
 pio.templates.default = "plotly_dark"
 
 def style_future(fig, title=None, height=CHART_HEIGHT):
@@ -47,14 +41,11 @@ def style_future(fig, title=None, height=CHART_HEIGHT):
     fig.update_yaxes(showgrid=True, gridcolor=THEME_GRID, zeroline=False)
     return fig
 
-def show_st(fig, title=None, height=CHART_HEIGHT, use_container_width=True):
+def show(fig, title=None, height=CHART_HEIGHT):
     fig = style_future(fig, title=title, height=height)
-    st.plotly_chart(fig, use_container_width=use_container_width)
+    st.plotly_chart(fig, use_container_width=True)
 
-def safe_time_axis(d: pd.DataFrame):
-    return "date" if "date" in d.columns and d["date"].notna().any() else None
-
-# -------------------- Data helpers --------------------
+# -------------------- Helpers --------------------
 def clean_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = (
@@ -67,428 +58,294 @@ def clean_cols(df: pd.DataFrame) -> pd.DataFrame:
     )
     return df
 
-def make_plot_safe(d: pd.DataFrame) -> pd.DataFrame:
-    return d.copy().replace({pd.NA: np.nan})
-
-def to_num(d: pd.DataFrame, cols) -> pd.DataFrame:
-    d = d.copy()
-    for c in cols:
-        if c in d.columns:
-            d[c] = pd.to_numeric(d[c], errors="coerce")
-    return d
-
-def per90(val, minutes):
-    minutes = minutes.replace(0, np.nan)
-    return val / (minutes / 90)
-
 def read_any_file(uploaded_file) -> pd.DataFrame:
     name = uploaded_file.name.lower()
+    raw = uploaded_file.getvalue()
     if name.endswith(".csv"):
         encodings = ["utf-8", "utf-8-sig", "latin-1", "cp1252"]
         last_err = None
-        raw = uploaded_file.getvalue()
         for enc in encodings:
             try:
                 return pd.read_csv(io.BytesIO(raw), sep=None, engine="python", encoding=enc, on_bad_lines="skip")
             except Exception as e:
                 last_err = e
         raise ValueError(f"Could not read {uploaded_file.name}. Last error: {last_err}")
-    else:
-        return pd.read_excel(uploaded_file)
+    return pd.read_excel(uploaded_file)
 
-def detect_gk_id_column(d: pd.DataFrame) -> str:
-    for c in ["goalkeeper", "player", "player_name", "name", "athlete"]:
-        if c in d.columns:
-            return c
-    return "source_file"
-
-def ensure_date(d: pd.DataFrame) -> pd.DataFrame:
-    d = d.copy()
-    if "date" in d.columns:
-        d["date"] = pd.to_datetime(d["date"], errors="coerce")
-        d = d.sort_values("date")
-    return d
-
-# ============================================================
-# 1) SINGLE DATASET DASHBOARD
-# ============================================================
-def goalkeeper_dashboards(d: pd.DataFrame):
-    d = ensure_date(make_plot_safe(d))
-
-    numeric_cols = [
-        "minutes_played","shots_against","conceded_goals","xcg",
-        "saves_with_reflexes",
-        "exits","sweeper_actions","claims","high_claims","punches",
-        "short_goal_kicks","long_goal_kicks",
-        "short_passes_accurate","long_passes_accurate",
-        "short_passes","long_passes"
+def coerce_dates(df: pd.DataFrame, max_cols_to_try: int = 6) -> tuple[pd.DataFrame, str | None]:
+    """
+    Try to detect a date-like column:
+    - Prefer common names (date, match_date, game_date, timestamp, etc.)
+    - Else test a few object columns by attempting to parse
+    """
+    df = df.copy()
+    preferred = [
+        "date", "match_date", "game_date", "timestamp", "time", "datetime",
+        "kickoff", "kick_off", "start_time"
     ]
-    d = to_num(d, numeric_cols)
-    x_time = safe_time_axis(d)
+    for c in preferred:
+        if c in df.columns:
+            parsed = pd.to_datetime(df[c], errors="coerce", utc=False)
+            if parsed.notna().mean() >= 0.6:
+                df[c] = parsed
+                return df.sort_values(c), c
 
-    left, right = st.columns(2)
+    obj_cols = [c for c in df.columns if df[c].dtype == "object"]
+    # Try the most promising few (by uniqueness and length)
+    candidates = sorted(
+        obj_cols,
+        key=lambda c: (df[c].nunique(dropna=True), df[c].astype(str).str.len().median() if len(df) else 0),
+        reverse=True
+    )[:max_cols_to_try]
 
-    # 1) Saves vs Shots Against -> BAR
-    if {"saves_with_reflexes","shots_against"}.issubset(d.columns):
-        with left:
-            if x_time is None:
-                tmp = pd.DataFrame({
-                    "metric":["saves_with_reflexes","shots_against"],
-                    "value":[np.nansum(d["saves_with_reflexes"]), np.nansum(d["shots_against"])]
-                })
-                fig = px.bar(tmp, x="metric", y="value")
-                fig.update_traces(marker_line_width=0.8, marker_line_color="rgba(255,255,255,0.25)")
-                show_st(fig, "Saves vs Shots Against (Totals)")
-            else:
-                tmp = d[[x_time,"saves_with_reflexes","shots_against"]].dropna(subset=[x_time])
-                fig = px.bar(tmp, x=x_time, y=["saves_with_reflexes","shots_against"], barmode="group")
-                fig.update_traces(marker_line_width=0.6, marker_line_color="rgba(255,255,255,0.22)")
-                show_st(fig, "Saves vs Shots Against (Per Date)")
+    for c in candidates:
+        parsed = pd.to_datetime(df[c], errors="coerce", utc=False)
+        if parsed.notna().mean() >= 0.6:
+            df[c] = parsed
+            return df.sort_values(c), c
 
-    # 2) Goal kick distribution short vs long -> BAR
-    if {"short_goal_kicks","long_goal_kicks"}.issubset(d.columns):
-        with right:
-            if x_time is None:
-                tmp = pd.DataFrame({
-                    "type":["short_goal_kicks","long_goal_kicks"],
-                    "count":[np.nansum(d["short_goal_kicks"]), np.nansum(d["long_goal_kicks"])]
-                })
-                fig = px.bar(tmp, x="type", y="count")
-                fig.update_traces(marker_line_width=0.8, marker_line_color="rgba(255,255,255,0.25)")
-                show_st(fig, "Goal Kick Distribution (Totals): Short vs Long")
-            else:
-                tmp = d[[x_time,"short_goal_kicks","long_goal_kicks"]].dropna(subset=[x_time])
-                fig = px.bar(tmp, x=x_time, y=["short_goal_kicks","long_goal_kicks"], barmode="group")
-                fig.update_traces(marker_line_width=0.6, marker_line_color="rgba(255,255,255,0.22)")
-                show_st(fig, "Goal Kick Distribution: Short vs Long (Over Time)")
+    return df, None
 
-    # 3) Distribution accuracy -> BAR (prefer rates if attempts exist)
-    left2, right2 = st.columns(2)
-    if {"short_passes_accurate","long_passes_accurate","short_passes","long_passes"}.issubset(d.columns):
-        d["short_acc_rate"] = d["short_passes_accurate"] / d["short_passes"].replace(0, np.nan)
-        d["long_acc_rate"]  = d["long_passes_accurate"]  / d["long_passes"].replace(0, np.nan)
+def detect_id_candidates(df: pd.DataFrame) -> list[str]:
+    """
+    Suggest grouping columns: team/player/match/opponent/competition etc.
+    Heuristics: object columns with reasonable cardinality (not too high, not too low).
+    """
+    id_like_names = [
+        "team", "opponent", "player", "player_name", "name", "athlete",
+        "match", "fixture", "competition", "season", "phase",
+        "position", "unit", "squad", "venue"
+    ]
+    candidates = []
 
-        with left2:
-            if x_time is None:
-                tmp = pd.DataFrame({
-                    "type":["short_acc_rate","long_acc_rate"],
-                    "rate":[np.nanmean(d["short_acc_rate"]), np.nanmean(d["long_acc_rate"])]
-                })
-                fig = px.bar(tmp, x="type", y="rate")
-                fig.update_traces(marker_line_width=0.8, marker_line_color="rgba(255,255,255,0.25)")
-                show_st(fig, "Distribution Accuracy (Avg Rate): Short vs Long")
-            else:
-                tmp = d[[x_time,"short_acc_rate","long_acc_rate"]].dropna(subset=[x_time])
-                fig = px.bar(tmp, x=x_time, y=["short_acc_rate","long_acc_rate"], barmode="group")
-                fig.update_traces(marker_line_width=0.6, marker_line_color="rgba(255,255,255,0.22)")
-                show_st(fig, "Distribution Accuracy (Rate): Short vs Long (Over Time)")
+    # name-based first
+    for c in id_like_names:
+        if c in df.columns and df[c].dtype == "object":
+            candidates.append(c)
 
-    elif {"short_passes_accurate","long_passes_accurate"}.issubset(d.columns):
-        with left2:
-            if x_time is None:
-                tmp = pd.DataFrame({
-                    "type":["short_passes_accurate","long_passes_accurate"],
-                    "count":[np.nansum(d["short_passes_accurate"]), np.nansum(d["long_passes_accurate"])]
-                })
-                fig = px.bar(tmp, x="type", y="count")
-                fig.update_traces(marker_line_width=0.8, marker_line_color="rgba(255,255,255,0.25)")
-                show_st(fig, "Distribution Accuracy (Totals): Short Accurate vs Long Accurate")
-            else:
-                tmp = d[[x_time,"short_passes_accurate","long_passes_accurate"]].dropna(subset=[x_time])
-                fig = px.bar(tmp, x=x_time, y=["short_passes_accurate","long_passes_accurate"], barmode="group")
-                fig.update_traces(marker_line_width=0.6, marker_line_color="rgba(255,255,255,0.22)")
-                show_st(fig, "Distribution Accuracy: Short Accurate vs Long Accurate (Over Time)")
+    # heuristic-based additions
+    for c in df.columns:
+        if df[c].dtype == "object":
+            nunq = df[c].nunique(dropna=True)
+            if 2 <= nunq <= 50 and c not in candidates:
+                candidates.append(c)
 
-    # 4) Conceded goals -> BAR
-    if "conceded_goals" in d.columns:
-        with right2:
-            if x_time is None:
-                tmp = pd.DataFrame({"metric":["conceded_goals_total"], "value":[np.nansum(d["conceded_goals"])]})
-                fig = px.bar(tmp, x="metric", y="value")
-                fig.update_traces(marker_line_width=0.8, marker_line_color="rgba(255,255,255,0.25)")
-                show_st(fig, "Conceded Goals (Total)")
-            else:
-                tmp = d[[x_time,"conceded_goals"]].dropna(subset=[x_time])
-                fig = px.bar(tmp, x=x_time, y="conceded_goals")
-                fig.update_traces(marker_line_width=0.6, marker_line_color="rgba(255,255,255,0.22)")
-                show_st(fig, "Conceded Goals (Over Time)")
+    return candidates[:12]
 
-    # 5) Exits / Sweeper -> RADAR
-    st.markdown("### Exits / Sweeper Profile")
-    minutes = d["minutes_played"] if "minutes_played" in d.columns else None
-    radar_axes, radar_vals = [], []
+def numeric_cols(df: pd.DataFrame) -> list[str]:
+    return [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
 
-    def add_axis(label, series, mode="mean"):
-        val = np.nanmean(series) if mode == "mean" else np.nansum(series)
-        if np.isfinite(val):
-            radar_axes.append(label)
-            radar_vals.append(val)
+def categorical_cols(df: pd.DataFrame) -> list[str]:
+    return [c for c in df.columns if df[c].dtype == "object"]
 
-    if "exits" in d.columns and minutes is not None:
-        add_axis("Exits p90", per90(d["exits"], minutes), "mean")
-    elif "exits" in d.columns:
-        add_axis("Exits (avg)", d["exits"], "mean")
+def make_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for c in df.columns:
+        if df[c].dtype == "object":
+            # try to parse numeric strings like "12.3", "45%", "1,234"
+            s = df[c].astype(str).str.replace(",", "", regex=False)
+            s = s.str.replace("%", "", regex=False)
+            # only convert if it seems numeric-ish
+            if s.str.match(r"^\s*-?\d+(\.\d+)?\s*$").mean() >= 0.7:
+                df[c] = pd.to_numeric(s, errors="coerce")
+    return df
 
-    for col, label in [
-        ("sweeper_actions", "Sweeper Actions (avg)"),
-        ("claims", "Claims (avg)"),
-        ("high_claims", "High Claims (avg)"),
-        ("punches", "Punches (avg)")
-    ]:
-        if col in d.columns:
-            add_axis(label, d[col], "mean")
-
-    if {"saves_with_reflexes","shots_against"}.issubset(d.columns):
-        add_axis("Save Rate", d["saves_with_reflexes"] / d["shots_against"].replace(0, np.nan), "mean")
-
-    if len(radar_axes) >= 3:
-        r = radar_vals + [radar_vals[0]]
-        theta = radar_axes + [radar_axes[0]]
-
-        fig = go.Figure()
-        fig.add_trace(go.Scatterpolar(
-            r=r,
-            theta=theta,
-            fill="toself",
-            line=dict(width=2),
-            name="Profile"
-        ))
-        fig.update_layout(
-            height=CHART_HEIGHT,
-            margin=CHART_MARGIN,
-            paper_bgcolor=THEME_BG,
-            font=dict(family="Inter, Arial", size=13, color=THEME_TEXT),
-            title="Exits / Sweeper Actions — Radar Profile",
-            title_x=0.02,
-            showlegend=False,
-            polar=dict(
-                bgcolor=THEME_BG,
-                radialaxis=dict(showgrid=True, gridcolor=THEME_GRID),
-                angularaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.06)")
-            )
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Not enough sweeper-related metrics found to build a radar (need at least 3).")
-
-# ============================================================
-# 2) GK COMPARISON
-# ============================================================
-def compare_goalkeepers(d: pd.DataFrame, max_gks: int = 20):
-    d = ensure_date(make_plot_safe(d))
-    gk_id = detect_gk_id_column(d)
-
-    if "date" not in d.columns or not d["date"].notna().any():
-        st.warning("No usable 'date' column detected for time-series comparison.")
-        return
-
-    d = to_num(d, [
-        "minutes_played","shots_against","conceded_goals","xcg","saves_with_reflexes",
-        "exits","sweeper_actions","claims","high_claims","punches",
-        "short_goal_kicks","long_goal_kicks",
-        "short_passes_accurate","long_passes_accurate","short_passes","long_passes"
-    ])
-
-    d = d.dropna(subset=[gk_id, "date"])
-    gk_list = list(d[gk_id].dropna().unique())[:max_gks]
-    d = d[d[gk_id].isin(gk_list)]
-
-    agg_cols = {
-        "minutes_played":"sum",
-        "shots_against":"sum",
-        "conceded_goals":"sum",
-        "xcg":"sum",
-        "saves_with_reflexes":"sum",
-        "exits":"sum",
-        "sweeper_actions":"sum",
-        "claims":"sum",
-        "high_claims":"sum",
-        "punches":"sum",
-        "short_goal_kicks":"sum",
-        "long_goal_kicks":"sum",
-        "short_passes_accurate":"sum",
-        "long_passes_accurate":"sum",
-        "short_passes":"sum",
-        "long_passes":"sum"
-    }
-    agg_cols = {k:v for k,v in agg_cols.items() if k in d.columns}
-    agg = d.groupby([gk_id, "date"], as_index=False).agg(agg_cols)
-
-    if {"saves_with_reflexes","shots_against"}.issubset(agg.columns):
-        agg["save_rate"] = agg["saves_with_reflexes"] / agg["shots_against"].replace(0, np.nan)
-
-    if {"xcg","conceded_goals"}.issubset(agg.columns):
-        agg["xg_prevented_proxy"] = agg["xcg"] - agg["conceded_goals"]
-
-    if "minutes_played" in agg.columns:
-        if "shots_against" in agg.columns:
-            agg["shots_against_p90"] = per90(agg["shots_against"], agg["minutes_played"])
-        if "conceded_goals" in agg.columns:
-            agg["conceded_p90"] = per90(agg["conceded_goals"], agg["minutes_played"])
-        if "exits" in agg.columns:
-            agg["exits_p90"] = per90(agg["exits"], agg["minutes_played"])
-
-    if {"short_passes_accurate","short_passes"}.issubset(agg.columns):
-        agg["short_acc_rate"] = agg["short_passes_accurate"] / agg["short_passes"].replace(0, np.nan)
-    if {"long_passes_accurate","long_passes"}.issubset(agg.columns):
-        agg["long_acc_rate"] = agg["long_passes_accurate"] / agg["long_passes"].replace(0, np.nan)
-
-    st.caption(f"Comparing GKs using ID column: `{gk_id}` • GKs detected: {agg[gk_id].nunique()}")
-
-    # Time-series multi-line
-    def line_future(y, title):
-        fig = px.line(agg, x="date", y=y, color=gk_id)
-        fig.update_traces(line=dict(width=2.6))
-        show_st(fig, title, height=440)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        if "save_rate" in agg.columns:
-            line_future("save_rate", "GK Comparison (Over Time): Save Rate")
-    with c2:
-        if "conceded_p90" in agg.columns:
-            line_future("conceded_p90", "GK Comparison (Over Time): Conceded Goals p90")
-
-    c3, c4 = st.columns(2)
-    with c3:
-        if "shots_against_p90" in agg.columns:
-            line_future("shots_against_p90", "GK Comparison (Over Time): Shots Against p90")
-    with c4:
-        if "exits_p90" in agg.columns:
-            line_future("exits_p90", "GK Comparison (Over Time): Exits p90")
-
-    st.markdown("### Summary comparisons")
-
-    # Summary BAR charts per GK
-    cols = st.columns(2)
-
-    if "conceded_goals" in agg.columns:
-        totals = agg.groupby(gk_id, as_index=False)["conceded_goals"].sum()
-        fig = px.bar(totals, x=gk_id, y="conceded_goals")
-        fig.update_traces(marker_line_width=0.8, marker_line_color="rgba(255,255,255,0.25)")
-        with cols[0]:
-            show_st(fig, "Conceded Goals (Total)")
-
-    if {"saves_with_reflexes","shots_against"}.issubset(agg.columns):
-        totals = agg.groupby(gk_id, as_index=False).agg({"saves_with_reflexes":"sum","shots_against":"sum"})
-        melted = totals.melt(id_vars=[gk_id], var_name="metric", value_name="value")
-        fig = px.bar(melted, x=gk_id, y="value", color="metric", barmode="group")
-        fig.update_traces(marker_line_width=0.7, marker_line_color="rgba(255,255,255,0.22)")
-        with cols[1]:
-            show_st(fig, "Saves vs Shots Against (Totals)")
-
-    cols2 = st.columns(2)
-
-    if {"short_goal_kicks","long_goal_kicks"}.issubset(agg.columns):
-        totals = agg.groupby(gk_id, as_index=False).agg({"short_goal_kicks":"sum","long_goal_kicks":"sum"})
-        melted = totals.melt(id_vars=[gk_id], var_name="type", value_name="count")
-        fig = px.bar(melted, x=gk_id, y="count", color="type", barmode="group")
-        fig.update_traces(marker_line_width=0.7, marker_line_color="rgba(255,255,255,0.22)")
-        with cols2[0]:
-            show_st(fig, "Goal Kick Distribution (Short vs Long)")
-
-    if {"short_acc_rate","long_acc_rate"}.issubset(agg.columns):
-        means = agg.groupby(gk_id, as_index=False).agg({"short_acc_rate":"mean","long_acc_rate":"mean"})
-        melted = means.melt(id_vars=[gk_id], var_name="type", value_name="rate")
-        fig = px.bar(melted, x=gk_id, y="rate", color="type", barmode="group")
-        fig.update_traces(marker_line_width=0.7, marker_line_color="rgba(255,255,255,0.22)")
-        with cols2[1]:
-            show_st(fig, "Distribution Accuracy (Avg Rate) — Short vs Long")
-
-    # Radar: sweeper profile per GK
-    st.markdown("### GK Comparison: Exits / Sweeper Radar Profile")
-    radar_candidates = []
-    if "exits_p90" in agg.columns: radar_candidates.append(("exits_p90","Exits p90","mean"))
-    if "sweeper_actions" in agg.columns: radar_candidates.append(("sweeper_actions","Sweeper Actions","sum"))
-    if "claims" in agg.columns: radar_candidates.append(("claims","Claims","sum"))
-    if "high_claims" in agg.columns: radar_candidates.append(("high_claims","High Claims","sum"))
-    if "punches" in agg.columns: radar_candidates.append(("punches","Punches","sum"))
-    if "save_rate" in agg.columns: radar_candidates.append(("save_rate","Save Rate","mean"))
-
-    if len(radar_candidates) >= 3:
-        agg_map = {col: (mode if mode in ["sum","mean"] else "mean") for col,_,mode in radar_candidates}
-        per_gk = agg.groupby(gk_id, as_index=False).agg(agg_map)
-
-        axes = [label for _,label,_ in radar_candidates]
-
-        fig = go.Figure()
-        for _, row in per_gk.iterrows():
-            vals = [row[col] for col,_,_ in radar_candidates]
-            fig.add_trace(go.Scatterpolar(
-                r=vals + [vals[0]],
-                theta=axes + [axes[0]],
-                fill="toself",
-                line=dict(width=2),
-                name=str(row[gk_id])
-            ))
-
-        fig.update_layout(
-            height=440,
-            margin=CHART_MARGIN,
-            paper_bgcolor=THEME_BG,
-            font=dict(family="Inter, Arial", size=13, color=THEME_TEXT),
-            title="GK Comparison: Exits / Sweeper Radar Profile",
-            title_x=0.02,
-            polar=dict(
-                bgcolor=THEME_BG,
-                radialaxis=dict(showgrid=True, gridcolor=THEME_GRID),
-                angularaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.06)")
-            ),
-            legend=dict(orientation="h", y=1.05, x=0)
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Not enough sweeper-related metrics found to build a multi-GK radar (need at least 3).")
+def add_source_file(df: pd.DataFrame, filename: str) -> pd.DataFrame:
+    df = df.copy()
+    df["source_file"] = filename
+    return df
 
 # -------------------- UI --------------------
-st.title("🧤 Goalkeeper Dashboard + Multi-file GK Comparison")
-st.caption("Upload one or more CSV/XLSX files. Streamlit will build the dashboard and compare goalkeepers over time.")
+st.title("📊 Sport Auto Dashboard (Any Dataset)")
+st.caption("Upload any sport dataset (team, player, match, training). The app auto-detects variables and builds charts.")
 
 with st.sidebar:
     st.header("Upload")
     uploaded_files = st.file_uploader(
-        "Upload GK performance file(s) (CSV or Excel)",
+        "Upload file(s) (CSV/XLSX)",
         type=["csv", "xlsx", "xls"],
         accept_multiple_files=True
     )
 
     st.divider()
-    st.header("Options")
-    max_gks = st.slider("Max goalkeepers in comparison", min_value=2, max_value=30, value=20)
-    view_mode = st.radio("View", ["Dataset dashboard", "GK comparison", "Both"], index=2)
+    st.header("Controls")
+    max_vars = st.slider("Max numeric variables to chart", 3, 20, 10)
+    max_categories = st.slider("Max category levels to display", 5, 30, 12)
+    sample_rows = st.slider("Preview rows", 10, 200, 25)
 
 if not uploaded_files:
     st.info("Upload at least one file to begin.")
     st.stop()
 
-# -------------------- Load data --------------------
+# -------------------- Load & combine --------------------
 dfs = []
 for uf in uploaded_files:
-    df = read_any_file(uf)
-    df = clean_cols(df)
+    d = read_any_file(uf)
+    d = clean_cols(d)
 
-    for col in df.select_dtypes(include=["object"]).columns:
-        df[col] = df[col].astype(str).str.strip()
+    # trim strings
+    for col in d.select_dtypes(include=["object"]).columns:
+        d[col] = d[col].astype(str).str.strip()
 
-    df["source_file"] = uf.name
-    dfs.append(df)
+    d = add_source_file(d, uf.name)
+    dfs.append(d)
 
 data = pd.concat(dfs, ignore_index=True, sort=False)
-data = make_plot_safe(data)
-data = ensure_date(data)
+data = data.replace({pd.NA: np.nan})
+data = make_numeric(data)
+data, date_col = coerce_dates(data)
 
 st.success(f"✅ Files loaded: {len(dfs)} • Rows: {len(data)} • Columns: {len(data.columns)}")
 
-with st.expander("Preview data"):
+with st.expander("Preview / detected columns"):
     st.write("Detected columns:")
     st.code(", ".join(list(data.columns)))
-    st.dataframe(data.head(25), use_container_width=True)
+    st.dataframe(data.head(sample_rows), use_container_width=True)
 
-# -------------------- Render dashboards --------------------
-if view_mode in ("Dataset dashboard", "Both"):
-    st.subheader("Dataset dashboard")
-    goalkeeper_dashboards(data)
+# -------------------- Detect variable types --------------------
+num_cols = numeric_cols(data)
+cat_cols = categorical_cols(data)
 
-if view_mode in ("GK comparison", "Both"):
-    st.subheader("GK comparison")
-    compare_goalkeepers(data, max_gks=max_gks)
+# Suggest grouping column
+id_candidates = detect_id_candidates(data)
+default_group = None
+for c in ["team", "player", "player_name", "name", "match", "competition", "source_file"]:
+    if c in data.columns:
+        default_group = c
+        break
+if default_group is None:
+    default_group = id_candidates[0] if id_candidates else "source_file"
+
+# Sidebar selectors
+with st.sidebar:
+    group_col = st.selectbox(
+        "Group by (optional)",
+        options=["(none)"] + id_candidates + (["source_file"] if "source_file" in data.columns else []),
+        index=(["(none)"] + id_candidates + (["source_file"] if "source_file" in data.columns else [])).index(default_group)
+        if default_group in (["(none)"] + id_candidates + (["source_file"] if "source_file" in data.columns else []))
+        else 0
+    )
+
+    if date_col:
+        st.caption(f"Date detected: `{date_col}`")
+    else:
+        st.caption("No date column detected.")
+
+# Apply optional group filter
+filtered = data.copy()
+if group_col != "(none)" and group_col in filtered.columns:
+    values = sorted([v for v in filtered[group_col].dropna().unique().tolist()])[:500]
+    chosen = st.multiselect(f"Filter {group_col}", options=values, default=values[: min(3, len(values))])
+    if chosen:
+        filtered = filtered[filtered[group_col].isin(chosen)]
+
+# -------------------- Overview --------------------
+st.subheader("Overview")
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Rows", f"{len(filtered):,}")
+c2.metric("Numeric vars", f"{len(num_cols)}")
+c3.metric("Categorical vars", f"{len(cat_cols)}")
+c4.metric("Files", f"{filtered['source_file'].nunique() if 'source_file' in filtered.columns else 1}")
+
+# Missingness
+with st.expander("Data quality (missing values)"):
+    miss = (filtered.isna().mean().sort_values(ascending=False) * 100).round(1)
+    miss_df = miss.reset_index()
+    miss_df.columns = ["column", "missing_%"]
+    st.dataframe(miss_df, use_container_width=True)
+
+# -------------------- Auto charts --------------------
+st.subheader("Auto Charts")
+
+if not num_cols:
+    st.warning("No numeric columns detected. Add numeric metrics to generate charts.")
+    st.stop()
+
+# Pick top numeric variables by non-null coverage + variance
+scores = []
+for c in num_cols:
+    coverage = filtered[c].notna().mean()
+    var = np.nanvar(filtered[c].astype(float).values) if coverage > 0 else 0
+    scores.append((c, coverage, var))
+scores = sorted(scores, key=lambda x: (x[1], x[2]), reverse=True)
+top_nums = [c for c, _, _ in scores[:max_vars]]
+
+# 1) Time series / trend (if date exists)
+if date_col:
+    st.markdown("### Trends over time")
+    # aggregate: mean for numeric
+    if group_col != "(none)" and group_col in filtered.columns:
+        for c in top_nums[: min(6, len(top_nums))]:
+            agg = (
+                filtered[[date_col, group_col, c]]
+                .dropna(subset=[date_col])
+                .groupby([group_col, date_col], as_index=False)[c]
+                .mean()
+            )
+            fig = px.line(agg, x=date_col, y=c, color=group_col)
+            fig.update_traces(line=dict(width=2.6))
+            show(fig, f"{c} (mean) over time")
+    else:
+        for c in top_nums[: min(6, len(top_nums))]:
+            agg = (
+                filtered[[date_col, c]]
+                .dropna(subset=[date_col])
+                .groupby(date_col, as_index=False)[c]
+                .mean()
+            )
+            fig = px.line(agg, x=date_col, y=c)
+            fig.update_traces(line=dict(width=2.6))
+            show(fig, f"{c} (mean) over time")
+
+# 2) Distributions (histograms)
+st.markdown("### Distributions")
+dist_cols = st.columns(2)
+for i, c in enumerate(top_nums[: min(6, len(top_nums))]):
+    with dist_cols[i % 2]:
+        fig = px.histogram(filtered, x=c, nbins=30)
+        show(fig, f"{c} distribution")
+
+# 3) Compare groups (box plots) if group chosen
+if group_col != "(none)" and group_col in filtered.columns:
+    st.markdown("### Group comparisons")
+    box_cols = st.columns(2)
+    for i, c in enumerate(top_nums[: min(6, len(top_nums))]):
+        with box_cols[i % 2]:
+            # limit categories for readability
+            top_levels = (
+                filtered[group_col].value_counts(dropna=True).head(max_categories).index.tolist()
+            )
+            d2 = filtered[filtered[group_col].isin(top_levels)]
+            fig = px.box(d2, x=group_col, y=c, points="outliers")
+            show(fig, f"{c} by {group_col}")
+
+# 4) Scatter explorer (choose any 2 numeric)
+st.markdown("### Scatter explorer")
+x = st.selectbox("X axis", options=top_nums, index=0)
+y = st.selectbox("Y axis", options=top_nums, index=min(1, len(top_nums) - 1))
+color_opt = None
+if group_col != "(none)" and group_col in filtered.columns:
+    color_opt = group_col
+fig = px.scatter(filtered, x=x, y=y, color=color_opt, trendline="ols" if len(filtered) >= 20 else None)
+show(fig, f"{y} vs {x}")
+
+# 5) Correlation heatmap (numeric only)
+st.markdown("### Correlations")
+corr_vars = top_nums[: min(12, len(top_nums))]
+if len(corr_vars) >= 3:
+    corr = filtered[corr_vars].corr(numeric_only=True)
+    fig = px.imshow(corr, text_auto=True, aspect="auto")
+    show(fig, "Correlation heatmap", height=520)
+else:
+    st.info("Need at least 3 numeric variables for a correlation heatmap.")
+
+# 6) Categorical frequency (if present)
+if cat_cols:
+    st.markdown("### Categorical frequencies")
+    cat_choice = st.selectbox("Category column", options=cat_cols, index=0)
+    vc = filtered[cat_choice].value_counts(dropna=True).head(max_categories).reset_index()
+    vc.columns = [cat_choice, "count"]
+    fig = px.bar(vc, x=cat_choice, y="count")
+    fig.update_traces(marker_line_width=0.8, marker_line_color="rgba(255,255,255,0.25)")
+    show(fig, f"Top {len(vc)} values of {cat_choice}")
