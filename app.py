@@ -3,7 +3,6 @@
 # Futuristic + modern styling, proportionate charts
 # ============================================================
 
-!pip -q install plotly openpyxl
 
 import pandas as pd
 import numpy as np
